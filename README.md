@@ -1,154 +1,238 @@
+# AnotherGlass
 
-# AnotherGlass for Google Glass
+An independent, native iPhone companion for **Google Glass Explorer Edition**. Bring the original Glass back into daily use with text cards, optional GPS, Apple Music controls, and a local photo/video gallery.
 
-![Logo](mobile/src/main/ic_launcher-playstore.png "Logo")
+SwiftUI on iPhone. A patched Android client on Glass. A direct local connection between them, with no cloud service or account required by this app.
 
-Companion application to handle **Google Glass Explorer Edition** and **Google Glass Enterprise Edition** communication with a phone without the official "My Glass" application and related Google Services.
+This repository preserves [Alex Smirnov's AnotherGlass](https://github.com/inckie/AnotherGlass) history and Android modules, and adds the iPhone companion plus the Explorer changes it needs. The iPhone app supports Explorer Edition; the inherited Enterprise and Android phone modules remain available for development.
 
-Currently, the application can:
- * pass GPS data from the phone to the Glass
- * forward ongoing and one-shot notifications to the Glass
- * control media playback on the phone (play/pause, next, previous) directly from Glass
- * perform tilt to wake up on Enterprise Edition like on Explorer Edition (be aware of battery usage)
- * pass Wi-Fi network information (SSID and password) from the phone to the Glass (Explorer Edition only)
+[Get started](#get-started) · [Build](#build-the-iphone-app) · [Architecture](#architecture) · [Protocol](ios/PROTOCOL.md) · [Detailed device setup](ios/README.md)
 
-## Building
+## What works where
 
-Project consist of 5 modules:
-* **glass-xe** - Google Glass Explorer Edition application, containing Client Service
-* **glass-ee** - Google Glass Enterprise Edition application, containing Client Service
-* **mobile** - companion application for mobile device, containing Host Service
-* **shared** - a shared module with shared classes and constants
-* **shared-glass** - a shared module between Glass applications
+| Capability | Bluetooth LE | Wi-Fi |
+| --- | :---: | :---: |
+| Approve a Glass connection on iPhone | ✓ | ✓ |
+| Glass battery and charging status | ✓ | ✓ |
+| Compose and remove text cards | ✓ | ✓ |
+| Optional iPhone GPS → Glass | ✓ | ✓ |
+| Apple Music playback state and controls | ✓ | ✓ |
+| Send Wi-Fi credentials to Glass | ✓ | ✓ |
+| Browse Glass photos and video | — | ✓ |
+| Download original files | — | ✓ |
+| Background companion without GPS | Event-driven BLE | No indefinite background hosting |
 
-Open and build in Android studio or using gradle command line.
-Builds can be signed by adding following properties in the root `local.properties` file:
+Downloaded originals stay available offline. You can play local videos, save to Photos, or share to Files. Downloads do not delete or modify media on Glass.
 
+**Scope:** Music controls use Apple's Music app, not a global media-session API. Text cards are composed in this app; automatic forwarding of other iPhone apps' notifications is not implemented. The iPhone Bluetooth mode is BLE GATT, separate from the Android companion's classic RFCOMM transport.
+
+## Get started
+
+### Requirements
+
+| Component | Requirement |
+| --- | --- |
+| iPhone | iOS 17 or later; Developer Mode for development installs |
+| Mac | Xcode with an iOS SDK/device-support version suitable for your iPhone |
+| Project generation | [XcodeGen](https://github.com/yonaskolb/XcodeGen), only when changing `ios/project.yml` |
+| Glass | Explorer Edition running Android API 19 or later, with USB debugging enabled |
+| Android build | JDK 17; Android SDK platform 37 and build tools 37.0.0 as declared in Gradle |
+| Device installation | Android platform tools (`adb`) and an Apple development signing team |
+
+The generated Xcode project is committed. **There are no third-party iOS package dependencies.** The source uses Swift 5 language mode and Apple frameworks.
+
+```sh
+git clone --recurse-submodules https://github.com/jonathanbertholet/AnotherGlass.git
+cd AnotherGlass
+open ios/AnotherGlass.xcodeproj
 ```
-keystore_path=<path to key store>
-keystore_password=<keystore password>
-key_alias=<key alias>
-key_password=<key password>
+
+In Xcode, choose the **AnotherGlass** target, select your team under **Signing & Capabilities**, and select your iPhone. Change `com.anotherglass.companion` if your signing setup requires a unique bundle identifier. No team, signing identity, provisioning profile or credentials are committed.
+
+Install the matching Explorer APK using the instructions below. Start the companion on iPhone, connect from Glass, and approve the incoming connection on iPhone. GPS and Music sharing are explicit opt-ins.
+
+### Build the iPhone app
+
+Compile an unsigned arm64 device app from the repository root:
+
+```sh
+xcodebuild \
+  -project ios/AnotherGlass.xcodeproj \
+  -scheme AnotherGlass \
+  -configuration Debug \
+  -destination 'generic/platform=iOS' \
+  -derivedDataPath ios/build/DerivedData \
+  CODE_SIGNING_ALLOWED=NO \
+  build
 ```
 
-## Running
+Output:
 
-### Google Glass Explorer Edition
+```text
+ios/build/DerivedData/Build/Products/Debug-iphoneos/AnotherGlass.app
+```
 
-Supports both Bluetooth and Wi-Fi connection modes.
+An unsigned `.app` is a compilation artifact. To install on an iPhone, use your own development team and build from Xcode. Creating a signed archive or distributable IPA also requires your signing configuration.
 
-1. Install both applications.
-2. Start Host Service from the phone app.
-3. On Glass, trigger/start AnotherGlass and choose connection mode:
-   - `Bluetooth` to connect over paired Bluetooth.
-   - `Wi-Fi` to connect using current network gateway IP.
-   - `Scan Barcode` to scan server IP from QR code (`ip` or `ip|label` format).
-4. If needed, use the long-press options and menu cards to reconnect using gateway IP or last scanned IP.
+When you change targets, source paths or build settings, edit the project specification and regenerate:
 
-For Bluetooth mode:
-1. Pair the Glass with the phone.
-2. Install both applications.
-3. Select Bluetooth connection mode in the phone application.
-4. Start service on Glass and choose `Bluetooth`.
+```sh
+cd ios
+xcodegen generate
+```
 
-For Wi-Fi mode:
-1. Ensure Glass and phone are on the same network, or use phone hotspot.
-2. Start service on Glass and choose `Wi-Fi`, or `Scan Barcode` to provide an explicit server IP.
-3. If QR scan succeeds, the scanned IP is remembered and shown as a quick reconnect option.
+Commit both `project.yml` and the generated `.xcodeproj` when project configuration changes. Build output and personal Xcode state are ignored.
 
-### Google Glass Enterprise Edition
+### Build and install the Glass client
 
-Uses Wi-Fi to connect to the phone. Bluetooth is not supported (it has issues connecting from UI on latest firmware, and can only be connected from hidden Applications settings on my device, but disconnects often).
+The bundled Explorer changes provide BLE, gallery requests, Wi-Fi bootstrap QR codes, initial battery reporting, and card removal. Use this checkout's APK rather than an arbitrary upstream binary.
 
-1. Setup and start Wi-Fi hotspot on the phone.
-2. Connect the Glass to the phone's Wi-Fi hotspot.
-3. Install both applications.
-4. Select Wi-Fi connection mode in the mobile application.
-5. Toggle service switch on the phone application to start Host Service. Accept the permissions requests.
-6. Run AnotherGlass application the Glass device from the launcher. Accept the permission requests.
+```sh
+# From the repository root
+git submodule update --init --recursive
+./gradlew :glass-xe:assembleDebug
+adb install -r glass-xe/build/outputs/apk/debug/glass-xe-debug.apk
+```
 
-Connection service keeps running in the background even if application is closed. Use swipe up or two fingers swipe down gestures to stop the service when in the application.
+The Android application ID is **`com.damn.anotherglass.host`**, despite its activities' `com.damn.anotherglass.glass.host` package names. To open the chooser directly:
 
-Without using a hotspot, if both devices are on the same Wi-Fi network, you can generate a QR code with the phone local IP address and scan it on the Glass by long-pressing the Service state card and selecting `Barcode` option.
+```sh
+adb shell am start -n \
+  com.damn.anotherglass.host/com.damn.anotherglass.glass.host.StartActivity
+```
 
-To enable GPS location passthrough on the Glass you will need to give the applicationMOCK_LOCATION permission. Run ADB command `adb shell appops set com.damn.anotherglass.glass.ee android:mock_location allow`, or tap on the Map card to open Developer settings and set AnotherGlass as GPS mocking application. Restart the service after the change.
+The checked-in GDK jar is a compile-time stub; Glass supplies the runtime implementation. The shared module pins Gson 2.10.1 for API 19 compatibility. Do not upgrade legacy-device dependencies solely to match the newest version.
 
-## Details
+Gradle also configures the inherited Enterprise gesture module, so initialize submodules even when building only Explorer. Put machine-specific Android SDK paths and optional signing properties in the ignored `local.properties` file. See [the inherited Android notes](docs/UPSTREAM.md) for other modules and signing keys.
 
-Originally, Glass application was serving as a host, and mobile was supposed to connect to it when some updates needed to be passed over, like notification status change or URL intent. But it turned out that the primary use case for the service was to serve as a GPS location provider, since most of my glassware is relying directly on web backends through tethered connection, so I switched the roles. In the future, I can add some 'temporary disconnected' state, when the Glass side will disconnect from the mobile application, but will open listening port so mobile application can 'knock' to re-instantiate the connection.
+## Connect the devices
 
-Can use Java object stream or JSON Lines to send data to Google Glass, since I don't want to mess with protocol buffers yet.
+### Bluetooth LE: the background companion
 
-## Media Playback Controls
+1. On iPhone's **Glass** tab, select **Bluetooth LE** and tap **Start companion**.
+2. On Glass, open AnotherGlass and select **iPhone Bluetooth LE**.
+3. Leave the iPhone app open for discovery and tap **Allow Glass** when prompted.
+4. Enable GPS or Music sharing only if you want them. GPS is not required for the BLE link.
 
-While the Host Service is running, AnotherGlass mirrors the currently playing media session from the phone to Glass in near real-time. Any app that integrates with the Android media system (Spotify, YouTube, YouTube Music, Podcast apps, etc.) is supported automatically — no extra setup is required.
+The iPhone advertises a GATT service; Glass connects as the central. Writes from Glass let iOS wake the peripheral to respond in the background. Initial discovery and rediscovery can require the iPhone app in the foreground. Force-quitting ends the session, and approved sessions are not restored after process termination. Every new connection requires approval.
 
-**What you see:**
-- The current track title, artist, and playback state are shown on the phone app UI.
-- **Explorer Edition:** a dedicated media live card appears in the Glass timeline whenever something is playing. Tap it to open the playback controls screen.
-- **Enterprise Edition:** a media card appears in the Glass timeline when a session is active.
+### Wi-Fi: captures and original downloads
 
-**Controls from Glass:**
-- **Tap** — play / pause toggle.
-- **Double-tap** — skip to next track.
-- **Explorer Edition playback screen:** swipe left/right to reach dedicated Previous and Next track cards; tap either to send that command.
+1. Join iPhone and Glass to the same **2.4 GHz WPA2-compatible** network. For Personal Hotspot, enable **Maximize Compatibility**.
+2. If Glass needs credentials, open **Setup → Wi-Fi setup QR code** on iPhone and scan it using **AnotherGlass → Scan Barcode** on Glass.
+3. On iPhone, select **Wi-Fi** and start the companion.
+4. Scan the separate connection QR code on the **Glass** tab, then approve the incoming connection on iPhone.
 
-Controls that the source app does not support are automatically disabled based on what the app reports as available actions.
+The credential QR joins a network. The connection QR identifies the iPhone host. They are different codes. On a shared LAN, the older Glass **Wi-Fi** chooser entry may target the router's gateway; scan the explicit iPhone address instead.
 
-The media card disappears automatically when there is nothing playing.
+Keep the app open for gallery transfers. A Wi-Fi listener alone does not grant indefinite iOS background execution. Background GPS is available as a separate opt-in for people who actually want location sharing.
 
-## Debug Python client
-There is a simple Python client in `python` folder to test the Glass Enterprise application without the mobile application. It can send fake GPS coordinates, notifications, and simulated media playback state to the Glass, and also receives and handles media control commands sent back from the Glass.
-Make sure to change communication protocol to JSON Lines by setting `SerializerProvider.currentSerializer` to `JSON`.
+## Architecture
 
-## APK Server
-There is a small GUI tool in `python/apk_server.py` to simplify sideloading APK files onto the Glass over Wi-Fi without ADB.
+```mermaid
+flowchart LR
+    UI[SwiftUI views] --> Model[CompanionModel]
+    Model --> Server[GlassServer]
+    Model --> GPS[LocationRelay]
+    Model --> Music[MusicRelay]
+    Model --> Gallery[MediaGallery]
+    Server --> TCP[Network.framework / TCP 9090]
+    Server --> BLE[BluetoothHost / Core Bluetooth]
+    TCP <--> Glass[Explorer Android client]
+    BLE <--> Glass
+    Gallery --> Files[MediaFiles / local originals]
+```
 
-1. Run `apk_server.py` (requires `qrcode` and `Pillow` from `python/requirements.txt`).
-2. The tool scans its own directory for `.apk` files and lists them.
-3. Select the APK you want to install and press **Start** — a local HTTP server starts serving that file.
-4. A QR code with the download URL is displayed. Scan it on the Glass using the `Scan Barcode` connection option (or any QR scanner), then open the URL in a browser or download manager to install the APK.
-5. Press **Stop** or close the window when done.
+`CompanionModel` owns the session and connects feature relays to the transport. `GlassServer` owns connection lifecycle, framing, approval, heartbeat and message routing. Views observe these existing owners directly; toggles do not create a parallel source of connection or permission state.
 
-## AnotherGlass Plans
+| Path | Responsibility |
+| --- | --- |
+| `ios/AnotherGlass/App/` | App entry, scene lifecycle, session composition and card deep links |
+| `ios/AnotherGlass/Views/GlassDesign.swift` | Shared palette, spacing, panels, buttons, empty states and Explorer vector drawing |
+| `ios/AnotherGlass/Views/` | Glass dashboard, card composer, gallery, setup, QR and activity screens |
+| `ios/AnotherGlass/Network/` | TCP listener, BLE peripheral, local IPv4 discovery |
+| `ios/AnotherGlass/Features/` | Core Location, Music player relay, gallery requests, local media storage |
+| `ios/AnotherGlass/Protocol/` | Codable envelopes and wire payloads |
+| `ios/project.yml` | XcodeGen project specification |
+| `glass-xe/` | Explorer app, BLE central, camera library service and Wi-Fi client |
+| `shared/` | Android RPC framing and shared payload models |
+| `glass-shared/` | Shared Glass components |
+| `mobile/`, `glass-ee/`, `xray/` | Inherited Android phone, Enterprise and supporting modules |
+| `python/` | Inherited protocol and APK-serving development utilities |
+| `externals/` | Upstream Enterprise sample submodule |
 
-### General
+### Wire contract
 
-* Rewrite the connections loops, so listening thread will be waiting for the incoming messages, and sending will happen in a separate thread (how I have peek/sleep cycle typical for desktop applications).
-* Enable/disable GPS dynamically (not sure if we can track it on the Glass though, but I can add a toggle intent/proxy service binding for use in my GlassWare at least).
-* Bi-directional intent routing (navigation, sharing). Actually, done in separate repo due to tight integration with private GlassWare.
-* Add file logging on both the Glass applications for debugging.
-* Map Card zoom levels selector.
+Both transports carry newline-delimited UTF-8 JSON envelopes:
 
-### Glass Enterprise Edition
+```json
+{"service":"MockGPS","type":"com.damn.anotherglass.shared.gps.Location","payload":{"latitude":50.85,"longitude":4.35,"altitude":30,"speed":0,"bearing":0,"accuracy":5}}
+```
 
-* Improve initial connect experience on the Glass Enterprise Edition:
-   * handle permissions and MockGPS status changes without restarting the service.
-* Add option to run service without mobile application connection to simulate Explorer Edition features:
-    * Add useful Voice Commands
-    * Implement WidgetHost to simulate Explorer Edition Timeline LiveCards
-    * Add Notifications "Tail" to simulate Explorer Edition
-    * Probably replace Launcher (need to add shortcut to Glass Settings then)
-* Add Bluetooth connection mode.
+The `type` field is the exact Java payload class name. Glass's Gson adapter resolves it with `Class.forName`; renaming a Swift type must not silently change the wire value. Enum strings and service names are case-sensitive. TCP and GATT packet boundaries are not message boundaries.
 
-### Glass Explorer Edition
-* Make a better Service Dashboard LiveCard.
-* Try to handle notifications action buttons on the Glass.
-* Add Dismiss command to notifications (send message to mobile application).
-* Add notifications filter options and better display.
-* Add one time notification stack activity (easy, but lazy).
-* Handle Bluetooth reconnects (Glass sometimes loses the Bluetooth connection and immediately reconnects, but I stop the service for now).
+The gallery uses paginated metadata, small Base64 thumbnails, and sequential original-file chunks over Wi-Fi. It validates request IDs, revisions, offsets and total length. One original downloads at a time, with cancellation and a 2 GB per-file limit. Interrupted transfers restart; there is no resume protocol. Glass exposes indexed shared photo/video media, not arbitrary paths.
 
-## GlassWare Plans
+Read **[ios/PROTOCOL.md](ios/PROTOCOL.md)** before changing message models, framing, heartbeat intervals, GATT UUIDs or gallery operations. It contains the service/type table, bounds, payload units and QR formats.
 
-I plan to write a number of small GlassWare applications to provide contextual AR information.
+### Working on a feature
 
-These applications will work with their own back-ends, and in some cases, have companion applications on the mobile to offload heavy calculations, or access some specific device data.
-Also they will make use of AnotherGlass to handle initial setup and route intents.
+- **UI:** start in the relevant view and reuse `GlassStyle`, `GlassPage`, `GlassSection` and `GlassPanel`. Preserve Dynamic Type and native navigation. The design uses graphite surfaces, SF typography, a small cyan prism accent and real session data; no external fonts or generated bitmap assets are required.
+- **New payload:** add the Swift `Codable` model and the Android counterpart, keep the exact Java class name in the envelope, route it through the existing approved connection, and update the protocol document.
+- **Transport:** preserve bounded framing, backpressure and per-connection approval. BLE stays for compact companion messages; bulk media stays on Wi-Fi.
+- **iOS permissions:** keep requests attached to explicit feature opt-ins. Update `Info.plist` purpose strings or the privacy manifest when a change requires it.
+- **Lifecycle:** use the existing scene callbacks. Do not depend on a foreground timer continuing while iOS suspends the app.
 
-* Face capture/recognizer (written, but not public)
-* Better navigation directions (written, but not public)
-* Basic calendar agenda viewer
-* Voice recorder
-* Timer
-* Better QR2 scanner
+### Local state and privacy
+
+| Data | Lifetime / location |
+| --- | --- |
+| Card history, activity, Wi-Fi credentials and location state | Memory only; not saved as history |
+| Browse thumbnails | Bounded in-memory cache |
+| Completed original downloads | `Documents/Glass Media`, exposed through the Files app |
+| Download record/thumbnail sidecars | Application Support |
+| Saved-to-Photos copies | User's Photos library after add-only authorization |
+
+There is no analytics SDK or backend. Activity entries omit card contents, coordinates and Wi-Fi passwords. Explicitly saving to Photos follows the user's Photos/iCloud settings.
+
+The inherited TCP link is **unencrypted and unauthenticated**. BLE has manual approval but no additional application-level encryption or encrypted GATT requirement. Approval gates private sharing; it is not cryptographic device pairing. Use a trusted network and account for this before extending the protocol to sensitive data.
+
+### Shortcuts
+
+Open this URL to prepare a card:
+
+```text
+anotherglass://card?title=Reminder&text=Take%20a%20break
+```
+
+The app opens the Cards tab and fills the composer. Sending still requires a tap. Query values should be URL-encoded. This version has no Share extension or all-app notification listener.
+
+## Troubleshooting
+
+| Symptom | First thing to check |
+| --- | --- |
+| Glass does not find the iPhone over BLE | Install the matching Explorer APK, choose **iPhone Bluetooth LE**, and foreground the iPhone app for discovery |
+| Cannot change connection mode | Stop the companion before changing the segmented control |
+| Wi-Fi connection targets the router | Scan the iPhone's connection QR rather than choosing gateway-based Wi-Fi on Glass |
+| iPhone hotspot address is absent | Enable the manual address in Setup and use the actual gateway reported by Glass |
+| Connection waits for approval | Confirm **Allow Glass** on the iPhone that started this session |
+| Gallery is unavailable over BLE | Switch to Wi-Fi; local downloads remain available in either mode |
+| Gallery is empty | The library reads Android's shared media index; pull to refresh after a capture |
+| Socket stops with iPhone locked | Use BLE for background companion traffic; Wi-Fi alone has no background entitlement |
+| Music from another app is missing | This relay controls Apple's Music app only |
+| ADB reports a signature mismatch | Update using the existing signing key, or explicitly decide whether to remove the old installation and its data |
+| Xcode cannot install on a newer iOS device | Use an Xcode version with support for that device's OS and configure your own signing team |
+
+## Build status and testing
+
+The UI refresh was compiled on **1 November 2026** with **Xcode 26.3 (17C529)** and the **iOS 26.2 SDK**, targeting arm64 / iOS 17 or later, with signing disabled. See the commit history for implementation changes. Compilation is separate from device behavior: no automated suites, simulator runs, visual checks or hardware functional tests were performed for this refresh. Device testing is left to the owner.
+
+The project remains in Swift 5 language mode. Xcode reports existing actor-isolation migration warnings for the `CBPeripheralManagerDelegate` and `CLLocationManagerDelegate` conformances in `BluetoothHost` and `LocationRelay`. Address their delegate execution context before enabling Swift 6 language mode. The App Intents metadata step also reports that there is no AppIntents dependency; this app uses its URL scheme for Shortcuts.
+
+The inherited Android CI configuration remains in `.github/workflows/`. The iPhone app has no added test target or third-party build tooling.
+
+## Credits and license
+
+Application source retains the [MIT license](LICENSE), including Alex Smirnov's upstream copyright. This is an independent project, not an official Google or Apple app. Original MyGlass binaries and assets are not included.
+
+The UI refresh applies the [Unslop](https://github.com/heydamir/unslop) design guidance by **Damir Sokolovsky ([@heydamir](https://x.com/heydamir))**, licensed under [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/). Its guidance was adapted to native SwiftUI: graphite surfaces, restrained color, consistent spacing, readable type, and an Explorer-specific visual. Unslop is design guidance, not a runtime dependency; its license does not replace the application's MIT license.

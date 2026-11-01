@@ -14,3 +14,18 @@
 __pycache__/
 
 /mobile/release
+
+# iPhone companion
+ios/build/
+ios/DerivedData/
+xcuserdata/
+*.xcuserstate
+
+# Local signing and credentials
+*.p12
+*.p8
+*.mobileprovision
+*.keystore
+*.jks
+.env
+.env.*

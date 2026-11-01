@@ -62,4 +62,11 @@ public class BatteryStatus {
             mReceiver = null;
         }
     }
+
+    public void publishCurrent() {
+        Intent stickyIntent = mContext.registerReceiver(null, new IntentFilter(Intent.ACTION_BATTERY_CHANGED));
+        if (mReceiver != null && stickyIntent != null) {
+            mReceiver.onReceive(mContext, stickyIntent);
+        }
+    }
 }

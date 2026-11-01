@@ -172,7 +172,8 @@ public class WiFiConnector {
         if (null != wifiInfo) {
             String ssid = wifiInfo.getSSID();
             if (null != ssid && !ssid.equalsIgnoreCase("<unknown ssid>"))
-                return ssid.replace("\"", "");
+                return ssid.length() >= 2 && ssid.startsWith("\"") && ssid.endsWith("\"")
+                        ? ssid.substring(1, ssid.length() - 1) : ssid;
         }
         return null;
     }
@@ -180,7 +181,7 @@ public class WiFiConnector {
     @NonNull
     private WifiConfiguration getOpenConfiguration() {
         WifiConfiguration wifiConfiguration = new WifiConfiguration();
-        wifiConfiguration.SSID = "\"" + mSSID + "\"";
+        wifiConfiguration.SSID = quote(mSSID);
         wifiConfiguration.allowedKeyManagement.set(WifiConfiguration.KeyMgmt.NONE);
         return wifiConfiguration;
     }
@@ -188,8 +189,8 @@ public class WiFiConnector {
     @NonNull
     private WifiConfiguration getWEPConfiguration() {
         WifiConfiguration wifiConfiguration = new WifiConfiguration();
-        wifiConfiguration.SSID = "\"" + mSSID + "\"";
-        wifiConfiguration.wepKeys[0] = "\"" + mPass + "\"";
+        wifiConfiguration.SSID = quote(mSSID);
+        wifiConfiguration.wepKeys[0] = quote(mPass);
         wifiConfiguration.wepTxKeyIndex = 0;
         wifiConfiguration.allowedKeyManagement.set(WifiConfiguration.KeyMgmt.NONE);
         wifiConfiguration.allowedGroupCiphers.set(WifiConfiguration.GroupCipher.WEP40);
@@ -199,8 +200,8 @@ public class WiFiConnector {
     @NonNull
     private WifiConfiguration getPSKConfiguration() {
         WifiConfiguration wifiConfiguration = new WifiConfiguration();
-        wifiConfiguration.SSID = "\"" + mSSID + "\"";
-        wifiConfiguration.preSharedKey = "\"" + mPass + "\"";
+        wifiConfiguration.SSID = quote(mSSID);
+        wifiConfiguration.preSharedKey = quote(mPass);
         wifiConfiguration.hiddenSSID = true;
         wifiConfiguration.status = WifiConfiguration.Status.ENABLED;
         wifiConfiguration.allowedGroupCiphers.set(WifiConfiguration.GroupCipher.TKIP);
@@ -211,6 +212,10 @@ public class WiFiConnector {
         wifiConfiguration.allowedProtocols.set(WifiConfiguration.Protocol.RSN);
         wifiConfiguration.allowedProtocols.set(WifiConfiguration.Protocol.WPA);
         return wifiConfiguration;
+    }
+
+    private static String quote(String value) {
+        return "\"" + value.replace("\\", "\\\\").replace("\"", "\\\"") + "\"";
     }
     //endregion
 }

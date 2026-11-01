@@ -19,6 +19,7 @@ import com.damn.glass.shared.notifications.NotificationId;
 import com.google.android.glass.timeline.LiveCard;
 
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 
 public class NotificationsCardController extends BroadcastReceiver {
@@ -64,8 +65,17 @@ public class NotificationsCardController extends BroadcastReceiver {
             }
         } else if (data.action == NotificationData.Action.Removed) {
             removeOngoing(id); // don't bother to check if it was ongoing there, just try to remove
-            // do not remove dismissible ones for now
-            // todo: remove dismissible ones and remove card if stack is empty
+            List<NotificationData> remaining = getDismissibleNotifications(NotificationController.getInstance());
+            if (remaining.isEmpty()) {
+                removeStack();
+            } else {
+                // Rebuild the stack around the newest remaining card without navigating to it.
+                NotificationData newest = remaining.get(0);
+                for (NotificationData notification : remaining) {
+                    if (notification.postedTime > newest.postedTime) newest = notification;
+                }
+                showDismissible(newest, false);
+            }
         }
     }
 

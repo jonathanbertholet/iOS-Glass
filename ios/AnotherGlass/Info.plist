@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleDevelopmentRegion</key><string>en</string>
+    <key>CFBundleDisplayName</key><string>AnotherGlass</string>
+    <key>CFBundleExecutable</key><string>$(EXECUTABLE_NAME)</string>
+    <key>CFBundleIdentifier</key><string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
+    <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
+    <key>CFBundleName</key><string>$(PRODUCT_NAME)</string>
+    <key>CFBundlePackageType</key><string>APPL</string>
+    <key>CFBundleShortVersionString</key><string>$(MARKETING_VERSION)</string>
+    <key>CFBundleVersion</key><string>$(CURRENT_PROJECT_VERSION)</string>
+    <key>LSRequiresIPhoneOS</key><true/>
+    <key>UILaunchScreen</key><dict/>
+    <key>UISupportedInterfaceOrientations</key>
+    <array><string>UIInterfaceOrientationPortrait</string></array>
+    <key>NSLocalNetworkUsageDescription</key>
+    <string>Connect your Google Glass over Wi-Fi to send location, cards, and music controls.</string>
+    <key>NSBonjourServices</key>
+    <array><string>_anotherglass._tcp</string></array>
+    <key>NSLocationWhenInUseUsageDescription</key>
+    <string>Forward your iPhone's location to your connected Glass when you enable GPS sharing.</string>
+    <key>NSAppleMusicUsageDescription</key>
+    <string>Show the Music app's current track on Glass and let you control playback from Glass.</string>
+    <key>NSBluetoothAlwaysUsageDescription</key>
+    <string>Keep your Google Glass companion connected over Bluetooth while you use other apps, without requiring GPS.</string>
+    <key>NSPhotoLibraryAddUsageDescription</key>
+    <string>Save photos and videos you download from your Google Glass to your iPhone's Photos library.</string>
+    <key>UIFileSharingEnabled</key><true/>
+    <key>LSSupportsOpeningDocumentsInPlace</key><true/>
+    <key>UIBackgroundModes</key><array><string>location</string><string>bluetooth-peripheral</string></array>
+    <key>CFBundleURLTypes</key>
+    <array><dict>
+        <key>CFBundleURLName</key><string>com.anotherglass.card</string>
+        <key>CFBundleURLSchemes</key><array><string>anotherglass</string></array>
+    </dict></array>
+</dict>
+</plist>

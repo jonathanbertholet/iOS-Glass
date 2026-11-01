@@ -14,7 +14,11 @@ import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
 
 import com.damn.anotherglass.glass.host.bluetooth.BluetoothClient;
+import com.damn.anotherglass.glass.host.bluetooth.BluetoothLEClient;
 import com.damn.anotherglass.glass.host.media.MediaCardController;
+import com.damn.anotherglass.glass.host.gallery.MediaLibrary;
+import com.damn.anotherglass.shared.gallery.MediaLibraryAPI;
+import com.damn.anotherglass.shared.gallery.MediaLibraryRequest;
 import com.damn.anotherglass.shared.rpc.IRPCClient;
 import com.damn.glass.shared.gps.MockGPS;
 import com.damn.glass.shared.media.MediaController;
@@ -55,6 +59,7 @@ public class HostService extends Service {
 
     public static final String CONNECTION_TYPE_BLUETOOTH = "bluetooth";
     public static final String CONNECTION_TYPE_WIFI = "wifi";
+    public static final String CONNECTION_TYPE_BLE = "ble";
 
     public static final String DEFAULT_WIFI_IP = "192.168.1.180"; // kept for source compatibility, prefer gateway auto-detection
 
@@ -70,6 +75,7 @@ public class HostService extends Service {
     private MediaCardController mMediaCardController;
 
     private BatteryStatus mBatteryStatus;
+    private MediaLibrary mMediaLibrary;
 
     @Override
     public IBinder onBind(Intent intent) {
@@ -116,6 +122,9 @@ public class HostService extends Service {
             final String connectionType = resolveConnectionType(intent);
             final String wifiIp = intent != null ? intent.getStringExtra(EXTRA_IP) : null;
             mRPCClient = createClient(connectionType, wifiIp);
+            mMediaLibrary = new MediaLibrary(this, message -> {
+                if (mRPCClient != null) mRPCClient.send(message);
+            });
             MediaController.getInstance().setService(message -> {
                 if (mRPCClient != null) {
                     mRPCClient.send(message);
@@ -130,12 +139,16 @@ public class HostService extends Service {
 
                 @Override
                 public void onConnectionStarted(@NonNull String device) {
+                    if (mMediaLibrary != null) mMediaLibrary.setConnected(true);
                     //noinspection ConstantConditions
                     audio.playSoundEffect(Sounds.SUCCESS);
                     // map can take a while or not show at all, so show status card
                     displayStatusCard(getString(R.string.msg_connected_to_s, device));
                     mCardProvider = new MapCard(mLiveCard, HostService.this);
                     mMediaCardController.onServiceConnected();
+                    // The initial sticky battery broadcast happens before the client exists.
+                    // Republish for every new phone connection.
+                    mBatteryStatus.publishCurrent();
                 }
 
                 @Override
@@ -145,18 +158,24 @@ public class HostService extends Service {
 
                 @Override
                 public void onConnectionLost(@Nullable String error) {
+                    if (mMediaLibrary != null) mMediaLibrary.setConnected(false);
                     //noinspection ConstantConditions
                     audio.playSoundEffect(Sounds.ERROR);
                     Toast.makeText(
                             HostService.this,
                             null != error ? error : getString(R.string.msg_disconnected),
                             Toast.LENGTH_LONG).show();
-                    stopSelf(); // do not restart for now
+                    if (CONNECTION_TYPE_WIFI.equals(connectionType) || CONNECTION_TYPE_BLE.equals(connectionType)) {
+                        displayStatusCard(getString(R.string.msg_waiting_for_connection));
+                    } else {
+                        stopSelf();
+                    }
                 }
 
                 @Override
                 public void onShutdown() {
-                    // already stopped in onConnectionLost
+                    // WiFiClient retries transient losses, then shuts down when exhausted.
+                    stopSelf();
                 }
             });
         } else {
@@ -167,7 +186,11 @@ public class HostService extends Service {
 
     private void route(@NonNull RPCMessage data) {
         // can use instanceof instead of .type, but for future sub-routing strings are more convenient
-        if (GPSServiceAPI.ID.equals(data.service)) {
+        if (MediaLibraryAPI.ID.equals(data.service)) {
+            if (mMediaLibrary != null && MediaLibraryRequest.class.getName().equals(data.type) && data.payload instanceof MediaLibraryRequest) {
+                mMediaLibrary.handle((MediaLibraryRequest) data.payload);
+            }
+        } else if (GPSServiceAPI.ID.equals(data.service)) {
             if (data.type.equals(Location.class.getName()))
                 mGPS.publish((Location) data.payload);
         } else if (NotificationsAPI.ID.equals(data.service)) {
@@ -202,6 +225,7 @@ public class HostService extends Service {
 
     @NonNull
     private IRPCClient createClient(@NonNull String connectionType, @Nullable String wifiIp) {
+        if (CONNECTION_TYPE_BLE.equals(connectionType)) return new BluetoothLEClient();
         if (CONNECTION_TYPE_WIFI.equals(connectionType)) {
             return new WiFiClient(wifiIp); // null → WiFiClient auto-detects gateway via ConnectionUtils
         }
@@ -225,11 +249,15 @@ public class HostService extends Service {
     }
 
     private boolean isKnownConnectionType(@Nullable String type) {
-        return CONNECTION_TYPE_BLUETOOTH.equals(type) || CONNECTION_TYPE_WIFI.equals(type);
+        return CONNECTION_TYPE_BLUETOOTH.equals(type) || CONNECTION_TYPE_WIFI.equals(type) || CONNECTION_TYPE_BLE.equals(type);
     }
 
     @Override
     public void onDestroy() {
+        if (mMediaLibrary != null) {
+            mMediaLibrary.close();
+            mMediaLibrary = null;
+        }
         if(null != mBatteryStatus) {
             mBatteryStatus.stop();
             mBatteryStatus = null;

@@ -13,6 +13,13 @@ import android.widget.Toast;
 
 import com.damn.anotherglass.glass.host.barcode.BarcodeScannerActivity;
 import com.damn.glass.shared.rpc.ConnectionUtils;
+import com.damn.anotherglass.glass.host.wifi.WiFiActivity;
+import com.damn.anotherglass.shared.wifi.WiFiConfiguration;
+import com.google.zxing.BarcodeFormat;
+import com.google.zxing.Result;
+import com.google.zxing.client.result.ParsedResult;
+import com.google.zxing.client.result.ResultParser;
+import com.google.zxing.client.result.WifiParsedResult;
 import com.google.android.glass.widget.CardBuilder;
 import com.google.android.glass.widget.CardScrollAdapter;
 import com.google.android.glass.widget.CardScrollView;
@@ -90,8 +97,7 @@ public class StartActivity extends Activity {
             if (option.hostIp != null) {
                 intent.putExtra(HostService.EXTRA_IP, option.hostIp);
             }
-            startService(intent);
-            finish();
+            startCompanion(intent);
         });
 
         setContentView(mCardScroller);
@@ -110,6 +116,21 @@ public class StartActivity extends Activity {
             return;
         }
 
+        // Bootstrap Wi-Fi from the iPhone without needing an existing RPC link.
+        // ZXing handles escaped delimiters in SSIDs and passwords.
+        ParsedResult parsed = ResultParser.parseResult(
+                new Result(scanResult, null, null, BarcodeFormat.QR_CODE));
+        if (parsed instanceof WifiParsedResult) {
+            WifiParsedResult wifi = (WifiParsedResult) parsed;
+            String security = wifi.getNetworkEncryption();
+            if (!"WPA".equalsIgnoreCase(security) && !"nopass".equalsIgnoreCase(security)) {
+                Toast.makeText(this, "Use a WPA/WPA2 or open Wi-Fi network", Toast.LENGTH_LONG).show();
+                return;
+            }
+            WiFiActivity.start(this, new WiFiConfiguration(wifi.getSsid(), wifi.getPassword()));
+            return;
+        }
+
         String ip = scanResult.split("\\|", 2)[0].trim();
         if (!Patterns.IP_ADDRESS.matcher(ip).matches()) {
             Toast.makeText(this, R.string.msg_invalid_barcode, Toast.LENGTH_SHORT).show();
@@ -124,6 +145,12 @@ public class StartActivity extends Activity {
         Intent intent = new Intent(this, HostService.class)
                 .putExtra(HostService.EXTRA_CONNECTION_TYPE, HostService.CONNECTION_TYPE_WIFI)
                 .putExtra(HostService.EXTRA_IP, ip);
+        startCompanion(intent);
+    }
+
+    private void startCompanion(Intent intent) {
+        // A new transport choice must replace the previous running client.
+        stopService(new Intent(this, HostService.class));
         startService(intent);
         finish();
     }
@@ -142,6 +169,12 @@ public class StartActivity extends Activity {
 
     private List<ConnectionOption> buildOptions() {
         List<ConnectionOption> options = new ArrayList<>();
+
+        options.add(new ConnectionOption(
+                R.string.title_connection_ble,
+                R.string.subtitle_connection_ble,
+                HostService.CONNECTION_TYPE_BLE
+        ));
 
         options.add(new ConnectionOption(
                 R.string.title_connection_bluetooth,

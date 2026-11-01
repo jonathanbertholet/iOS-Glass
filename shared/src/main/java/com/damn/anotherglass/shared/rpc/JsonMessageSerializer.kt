@@ -10,7 +10,6 @@ import com.google.gson.JsonParseException
 import com.google.gson.JsonPrimitive
 import com.google.gson.JsonSerializationContext
 import com.google.gson.JsonSerializer
-import com.google.gson.Strictness
 import java.io.BufferedReader
 import java.io.InputStream
 import java.io.InputStreamReader
@@ -32,7 +31,7 @@ internal class JsonMessageSerializer(inputStream: InputStream, outputStream: Out
         gson = GsonBuilder()
             .registerTypeAdapter(RPCMessage::class.java, RPCMessageDeserializer())
             .registerTypeAdapter(ByteArray::class.java, ByteArrayBase64Adapter())
-            .setStrictness(Strictness.LENIENT)
+            .setLenient()
             .create()
         writer = OutputStreamWriter(outputStream, StandardCharsets.UTF_8)
         reader = BufferedReader(InputStreamReader(inputStream, StandardCharsets.UTF_8))
