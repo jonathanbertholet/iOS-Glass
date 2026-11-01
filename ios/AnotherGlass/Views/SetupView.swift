@@ -86,7 +86,7 @@ struct SetupView: View {
 
             GlassSection(title: "About") {
                 GlassPanel {
-                    LabeledContent("AnotherGlass for iPhone", value: "0.2.0").font(.subheadline)
+                    LabeledContent("AnotherGlass for iPhone", value: "0.2.1").font(.subheadline)
                     Text("An independent companion for Google Glass Explorer Edition. Based on Alex Smirnov's AnotherGlass, under the MIT license.")
                         .font(.footnote).foregroundStyle(GlassStyle.secondary)
                     Link(destination: URL(string: "https://github.com/inckie/AnotherGlass")!) {

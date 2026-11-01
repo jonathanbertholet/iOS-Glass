@@ -51,11 +51,49 @@ private struct OutgoingMessage<Payload: Encodable>: Encodable {
 struct IncomingMessage: Decodable {
     let service: String?
     let type: String?
-    let payload: JSONValue?
+    private let payload: Payload?
+
+    private enum CodingKeys: String, CodingKey { case service, type, payload }
+    private enum Payload {
+        case battery(GlassBattery)
+        case command(GlassMediaCommand)
+        case library(GlassMediaReply)
+        case other(JSONValue)
+    }
+
+    init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        service = try values.decodeIfPresent(String.self, forKey: .service)
+        type = try values.decodeIfPresent(String.self, forKey: .type)
+        guard values.contains(.payload), try !values.decodeNil(forKey: .payload) else {
+            payload = nil
+            return
+        }
+        // Decode known payloads once. In particular, media bytes must not pass through a
+        // generic JSON tree, JSONEncoder and a second JSONDecoder for every file chunk.
+        switch type {
+        case GlassProtocol.batteryType:
+            payload = .battery(try values.decode(GlassBattery.self, forKey: .payload))
+        case GlassProtocol.mediaCommandType:
+            payload = .command(try values.decode(GlassMediaCommand.self, forKey: .payload))
+        case GlassProtocol.mediaLibraryResponseType:
+            payload = .library(try values.decode(GlassMediaReply.self, forKey: .payload))
+        default:
+            payload = .other(try values.decode(JSONValue.self, forKey: .payload))
+        }
+    }
 
     func decodePayload<T: Decodable>(_ type: T.Type) throws -> T {
-        guard let payload else { throw GlassProtocol.WireError.malformedMessage }
-        return try JSONDecoder().decode(type, from: JSONEncoder().encode(payload))
+        let value: Any
+        switch payload {
+        case .battery(let battery): value = battery
+        case .command(let command): value = command
+        case .library(let library): value = library
+        case .other(let json): return try JSONDecoder().decode(type, from: JSONEncoder().encode(json))
+        case nil: throw GlassProtocol.WireError.malformedMessage
+        }
+        guard let result = value as? T else { throw GlassProtocol.WireError.malformedMessage }
+        return result
     }
 }
 

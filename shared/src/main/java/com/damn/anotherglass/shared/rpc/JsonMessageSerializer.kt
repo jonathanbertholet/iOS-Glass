@@ -10,6 +10,7 @@ import com.google.gson.JsonParseException
 import com.google.gson.JsonPrimitive
 import com.google.gson.JsonSerializationContext
 import com.google.gson.JsonSerializer
+import java.io.BufferedWriter
 import java.io.BufferedReader
 import java.io.InputStream
 import java.io.InputStreamReader
@@ -24,7 +25,7 @@ import kotlin.io.encoding.ExperimentalEncodingApi
 internal class JsonMessageSerializer(inputStream: InputStream, outputStream: OutputStream) :
     IMessageSerializer {
     private val gson: Gson
-    private val writer: OutputStreamWriter
+    private val writer: BufferedWriter
     private val reader: BufferedReader
 
     init {
@@ -32,9 +33,12 @@ internal class JsonMessageSerializer(inputStream: InputStream, outputStream: Out
             .registerTypeAdapter(RPCMessage::class.java, RPCMessageDeserializer())
             .registerTypeAdapter(ByteArray::class.java, ByteArrayBase64Adapter())
             .setLenient()
+            .disableHtmlEscaping()
             .create()
-        writer = OutputStreamWriter(outputStream, StandardCharsets.UTF_8)
-        reader = BufferedReader(InputStreamReader(inputStream, StandardCharsets.UTF_8))
+        // Gson emits a JSON string as many small Writer calls. Buffer them before UTF-8
+        // encoding/socket writes, especially with TCP_NODELAY on the Glass link.
+        writer = BufferedWriter(OutputStreamWriter(outputStream, StandardCharsets.UTF_8), 64 * 1024)
+        reader = BufferedReader(InputStreamReader(inputStream, StandardCharsets.UTF_8), 64 * 1024)
     }
 
     @Throws(Exception::class)
@@ -48,7 +52,7 @@ internal class JsonMessageSerializer(inputStream: InputStream, outputStream: Out
     override fun readMessage(): RPCMessage? {
         // do not read from the stream directly,
         // since it will look like multiple concatenated JSONs
-        val line = reader.readLine()
+        val line = reader.readLine() ?: return null
         try {
             return gson.fromJson(line, RPCMessage::class.java)
         } catch (e: JsonParseException) {

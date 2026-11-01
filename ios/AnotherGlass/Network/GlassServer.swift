@@ -44,6 +44,8 @@ final class GlassServer: ObservableObject {
     private var foreground = true
     private var connection: NWConnection?
     private var buffer = Data()
+    private var lineScanOffset = 0
+    private let decoder = JSONDecoder()
     private var heartbeat: Task<Void, Never>?
     private var lastReceived = Date()
     private var approvalDeadline = Date()
@@ -66,6 +68,7 @@ final class GlassServer: ObservableObject {
         do {
             let parameters = NWParameters.tcp
             parameters.allowLocalEndpointReuse = true
+            (parameters.defaultProtocolStack.transportProtocol as? NWProtocolTCP.Options)?.noDelay = true
             // Cellular is never a route for this local, legacy protocol.
             parameters.prohibitedInterfaceTypes = [.cellular]
             let host = try NWListener(using: parameters, on: NWEndpoint.Port(rawValue: GlassProtocol.port)!)
@@ -127,6 +130,7 @@ final class GlassServer: ObservableObject {
         heartbeat?.cancel()
         heartbeat = nil
         buffer.removeAll(keepingCapacity: false)
+        lineScanOffset = 0
         peer = nil
         pendingPeer = nil
         pendingWrites = 0
@@ -166,6 +170,7 @@ final class GlassServer: ObservableObject {
         guard connection == nil else { incoming.cancel(); return }
         connection = incoming
         buffer.removeAll(keepingCapacity: true)
+        lineScanOffset = 0
         incoming.stateUpdateHandler = { [weak self, weak incoming] state in
             Task { @MainActor in
                 guard let self, let incoming, self.connection === incoming else { return }
@@ -190,7 +195,7 @@ final class GlassServer: ObservableObject {
     }
 
     private func receive(from client: NWConnection) {
-        client.receive(minimumIncompleteLength: 1, maximumLength: 16 * 1024) { [weak self, weak client] data, _, ended, error in
+        client.receive(minimumIncompleteLength: 1, maximumLength: 64 * 1024) { [weak self, weak client] data, _, ended, error in
             Task { @MainActor in
                 guard let self, let client, self.connection === client else { return }
                 if let data, !data.isEmpty {
@@ -207,13 +212,16 @@ final class GlassServer: ObservableObject {
     }
 
     private func drainLines(reply: (Data) -> Void) throws {
-        while let newline = buffer.firstIndex(of: 0x0A) {
+        // A partial line has already been scanned. Continue at the newly appended bytes
+        // instead of rescanning a growing Base64 payload on every network callback.
+        while let newline = buffer[buffer.index(buffer.startIndex, offsetBy: lineScanOffset)...].firstIndex(of: 0x0A) {
             let line = Data(buffer[..<newline])
             buffer.removeSubrange(...newline)
+            lineScanOffset = 0
             guard line.count <= GlassProtocol.maximumLineBytes else { throw GlassProtocol.WireError.messageTooLarge }
             if line.isEmpty { continue }
             let message: IncomingMessage
-            do { message = try JSONDecoder().decode(IncomingMessage.self, from: line) }
+            do { message = try decoder.decode(IncomingMessage.self, from: line) }
             catch { throw GlassProtocol.WireError.malformedMessage }
             lastReceived = Date()
             receivedCount += 1
@@ -231,6 +239,7 @@ final class GlassServer: ObservableObject {
             if peer == nil { return }
         }
         guard buffer.count <= GlassProtocol.maximumLineBytes else { throw GlassProtocol.WireError.messageTooLarge }
+        lineScanOffset = buffer.count
     }
 
     private func write(_ bytes: Data, to client: NWConnection, completion: ((Bool) -> Void)? = nil) {

@@ -44,11 +44,19 @@ public final class MediaLibrary {
     private final ThreadPoolExecutor worker = new ThreadPoolExecutor(
             1, 1, 0, TimeUnit.MILLISECONDS, new ArrayBlockingQueue<>(16));
     private final AtomicInteger generation = new AtomicInteger();
+    private final AtomicInteger indexGeneration = new AtomicInteger();
+    // Owned exclusively by the single media worker; at most one original is held open.
+    private ReadSession readSession;
     private final Handler handler = new Handler(Looper.getMainLooper());
     private volatile boolean connected;
     private final Runnable changed = this::notifyChanged;
+    private final Runnable closeIdleReader = () -> {
+        try { worker.execute(this::closeReadSession); }
+        catch (RejectedExecutionException ignored) { }
+    };
     private final ContentObserver observer = new ContentObserver(handler) {
         @Override public void onChange(boolean selfChange) {
+            indexGeneration.incrementAndGet();
             handler.removeCallbacks(changed);
             handler.postDelayed(changed, 600);
         }
@@ -78,8 +86,10 @@ public final class MediaLibrary {
                     else if ("Read".equals(request.operation)) read(request, response);
                     else throw new LibraryException("Unknown media operation. Update both companion apps.");
                 } catch (SecurityException e) {
+                    if ("Read".equals(request.operation)) closeReadSession();
                     response.error = "Glass storage access is denied. Reinstall the updated Explorer APK with storage access.";
                 } catch (Exception e) {
+                    if ("Read".equals(request.operation)) closeReadSession();
                     // Never include local paths or raw provider exception messages in RPC errors.
                     response.error = e instanceof LibraryException ? e.getMessage() : "Could not read this media item on Glass.";
                 }
@@ -95,6 +105,9 @@ public final class MediaLibrary {
     public void invalidateRequests() {
         generation.incrementAndGet();
         worker.getQueue().clear();
+        handler.removeCallbacks(closeIdleReader);
+        try { worker.execute(this::closeReadSession); }
+        catch (RejectedExecutionException ignored) { }
     }
 
     public void setConnected(boolean value) {
@@ -115,7 +128,8 @@ public final class MediaLibrary {
         handler.removeCallbacks(changed);
         resolver.unregisterContentObserver(observer);
         invalidateRequests();
-        worker.shutdownNow();
+        // Let the in-progress bounded read and queued handle cleanup complete.
+        worker.shutdown();
     }
 
     private static MediaLibraryResponse responseFor(MediaLibraryRequest request) {
@@ -178,19 +192,48 @@ public final class MediaLibrary {
     }
 
     private void read(MediaLibraryRequest request, MediaLibraryResponse response) throws IOException {
-        Resolved media = resolve(request);
+        int indexEpoch = indexGeneration.get();
+        if (readSession == null || readSession.indexEpoch != indexEpoch
+                || !readSession.media.item.id.equals(request.mediaId)
+                || !readSession.media.item.revision.equals(request.revision)) {
+            closeReadSession();
+            Resolved media = resolve(request);
+            readSession = new ReadSession(media, new RandomAccessFile(media.file, "r"), indexEpoch);
+        }
+        Resolved media = readSession.media;
+        if (!media.file.isFile() || !revision(media.file).equals(request.revision)) {
+            throw new LibraryException("This item changed on Glass. Refresh the gallery.");
+        }
         long size = media.file.length();
         if (request.offset < 0 || request.offset >= size) throw new LibraryException("Invalid media offset. Refresh the gallery.");
         int count = (int) Math.min(Math.max(1, Math.min(request.length, MAX_CHUNK_BYTES)), size - request.offset);
         byte[] data = new byte[count];
-        try (RandomAccessFile file = new RandomAccessFile(media.file, "r")) {
-            file.seek(request.offset);
-            file.readFully(data);
-        }
+        RandomAccessFile file = readSession.file;
+        if (file.getFilePointer() != request.offset) file.seek(request.offset);
+        file.readFully(data);
         if (!revision(media.file).equals(request.revision)) throw new LibraryException("This item changed on Glass. Refresh the gallery.");
         response.offset = request.offset;
         response.totalBytes = size;
         response.data = data;
+        handler.removeCallbacks(closeIdleReader);
+        handler.postDelayed(closeIdleReader, 30_000);
+    }
+
+    private void closeReadSession() {
+        if (readSession == null) return;
+        try { readSession.file.close(); } catch (IOException ignored) { }
+        readSession = null;
+    }
+
+    private static final class ReadSession {
+        final Resolved media;
+        final RandomAccessFile file;
+        final int indexEpoch;
+        ReadSession(Resolved media, RandomAccessFile file, int indexEpoch) {
+            this.media = media;
+            this.file = file;
+            this.indexEpoch = indexEpoch;
+        }
     }
 
     private Resolved resolve(MediaLibraryRequest request) throws IOException {

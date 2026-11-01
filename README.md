@@ -171,9 +171,21 @@ Both transports carry newline-delimited UTF-8 JSON envelopes:
 
 The `type` field is the exact Java payload class name. Glass's Gson adapter resolves it with `Class.forName`; renaming a Swift type must not silently change the wire value. Enum strings and service names are case-sensitive. TCP and GATT packet boundaries are not message boundaries.
 
-The gallery uses paginated metadata, small Base64 thumbnails, and sequential original-file chunks over Wi-Fi. It validates request IDs, revisions, offsets and total length. One original downloads at a time, with cancellation and a 2 GB per-file limit. Interrupted transfers restart; there is no resume protocol. Glass exposes indexed shared photo/video media, not arbitrary paths.
+The gallery uses paginated metadata, small Base64 thumbnails, and a four-chunk original-download pipeline over Wi-Fi. It validates request IDs, revisions, offsets and total length. One original downloads at a time, with cancellation and a 2 GB per-file limit. Interrupted transfers restart; there is no resume protocol. Glass exposes indexed shared photo/video media, not arbitrary paths.
 
 Read **[ios/PROTOCOL.md](ios/PROTOCOL.md)** before changing message models, framing, heartbeat intervals, GATT UUIDs or gallery operations. It contains the service/type table, bounds, payload units and QR formats.
+
+### Transfer performance
+
+iPhone **0.2.1** and Explorer **1.2** remove the inherited 100 ms Wi-Fi polling cycle. Install both apps for the complete update:
+
+- Independent blocking socket reader and writer, with an outgoing queue that wakes immediately when data arrives. Heartbeat waits occur only while idle; reconnect backoff remains separate.
+- Up to four 96 KiB reads in flight, with a bounded out-of-order buffer and ordered local file writes. Request IDs, offsets, lengths, total bytes and file revisions are still checked.
+- Buffered JSON writes and larger read buffers on Glass, avoiding tiny socket writes while retaining the existing JSON Lines protocol.
+- One cached Glass file handle and resolved media record across chunks, invalidated on disconnect, index change, file revision change, errors or idle expiry.
+- Direct typed payload decoding on iPhone, incremental line scanning, throttled UI progress updates, and deferred unrelated thumbnails during a download.
+
+The transfer still uses Base64 and the existing single TCP connection. No throughput benchmark or hardware test was run for this update; the speed improvement must be measured on the devices. Protocol compatibility is retained, but an older app retains its own bottlenecks.
 
 ### Working on a feature
 
@@ -225,7 +237,9 @@ The app opens the Cards tab and fills the composer. Sending still requires a tap
 
 ## Build status and testing
 
-The UI refresh was compiled on **1 November 2026** with **Xcode 26.3 (17C529)** and the **iOS 26.2 SDK**, targeting arm64 / iOS 17 or later, with signing disabled. See the commit history for implementation changes. Compilation is separate from device behavior: no automated suites, simulator runs, visual checks or hardware functional tests were performed for this refresh. Device testing is left to the owner.
+The iPhone **0.2.1** transfer update was compiled on **1 November 2026** with **Xcode 26.3 (17C529)** and the **iOS 26.2 SDK**, targeting arm64 / iOS 17 or later, with signing disabled. See the commit history for implementation changes. Compilation is separate from device behavior: no automated suites, simulator runs, visual checks or hardware functional tests were performed for these changes. Device testing is left to the owner.
+
+Explorer **1.2** (version code 3) also compiled successfully with `:glass-xe:assembleDebug` using Gradle 9.6.0. Gradle uses the configured JDK 21 daemon and JDK 17 compilation toolchain. The APK is debug-signed; build output stays out of Git.
 
 The project remains in Swift 5 language mode. Xcode reports existing actor-isolation migration warnings for the `CBPeripheralManagerDelegate` and `CLLocationManagerDelegate` conformances in `BluetoothHost` and `LocationRelay`. Address their delegate execution context before enabling Swift 6 language mode. The App Intents metadata step also reports that there is no AppIntents dependency; this app uses its URL scheme for Shortcuts.
 

@@ -1,6 +1,6 @@
 import Foundation
 
-struct GlassMediaItem: Codable, Identifiable, Hashable {
+struct GlassMediaItem: Codable, Identifiable, Hashable, Sendable {
     let id: String
     let name: String
     let kind: String

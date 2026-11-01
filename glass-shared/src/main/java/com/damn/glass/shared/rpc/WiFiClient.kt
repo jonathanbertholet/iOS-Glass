@@ -11,9 +11,9 @@ import com.damn.anotherglass.shared.rpc.RPCMessageListener
 import com.damn.anotherglass.shared.rpc.SerializerProvider
 import java.net.InetSocketAddress
 import java.net.Socket
-import java.net.SocketTimeoutException
-import java.util.concurrent.BlockingQueue
 import java.util.concurrent.LinkedBlockingDeque
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 
 class WiFiClient(private val hostIP: String? = null) : IRPCClient {
 
@@ -54,7 +54,7 @@ class WiFiClient(private val hostIP: String? = null) : IRPCClient {
     ) : Thread() {
 
         private val handler: RPCHandler = RPCHandler(listener)
-        private val queue: BlockingQueue<RPCMessage> = LinkedBlockingDeque()
+        private val queue = LinkedBlockingDeque<RPCMessage>(MAX_QUEUED_MESSAGES)
 
         @Volatile
         private var active = true
@@ -71,12 +71,14 @@ class WiFiClient(private val hostIP: String? = null) : IRPCClient {
                 try {
                     try {
                         socket.tcpNoDelay = true
-                        socket.setSoLinger(true, 2)
+                        // Closing a failed link must not block the service waiting for linger.
+                        socket.setSoLinger(false, 0)
                     } catch (_: Exception) {
                     }
                     attempt++
                     Log.i(TAG, "Connecting to $ip (attempt $attempt/$MAX_RECONNECT_ATTEMPTS)...")
                     socket.connect(InetSocketAddress(ip, Constants.defaultPort), CONNECT_TIMEOUT_MS)
+                    socket.soTimeout = PING_TIMEOUT_MS.toInt()
                     if (!active) {
                         break
                     }
@@ -102,6 +104,8 @@ class WiFiClient(private val hostIP: String? = null) : IRPCClient {
                     Log.w(TAG, "Connection failed (attempt $attempt/$MAX_RECONNECT_ATTEMPTS): ${e.message}")
                     handler.onConnectionLost(e.message)
                 } finally {
+                    // Replies belong to this connection, never to the next approved session.
+                    queue.clear()
                     currentSocket = null
                     try {
                         socket.close()
@@ -129,105 +133,65 @@ class WiFiClient(private val hostIP: String? = null) : IRPCClient {
         }
 
         private fun runLoop(socket: Socket) {
-            socket.getInputStream().use { inputStream ->
-                socket.getOutputStream().use { outputStream ->
-                    val serializer = SerializerProvider.getSerializer(inputStream, outputStream)
-                    var lastSentTime = System.currentTimeMillis()
-                    var lastReceivedTime = System.currentTimeMillis()
-
-                    while (active || queue.peek() != null) {
-                        val now = System.currentTimeMillis()
-
-                        // Send queued messages
-                        while (queue.peek() != null) {
-                            val message = queue.take()
-                            serializer.writeMessage(message)
-                            lastSentTime = System.currentTimeMillis()
-                            if (message.service == null) {
-                                try {
-                                    socket.shutdownOutput()
-                                } catch (_: Exception) {
-                                }
-                                try {
-                                    sleep(200)
-                                } catch (_: InterruptedException) {
-                                }
-                                return // disconnect requested
-                            }
-                        }
-
-                        // Send periodic ping if idle
-                        if (active && now - lastSentTime >= PING_INTERVAL_MS) {
-                            serializer.writeMessage(RPCMessage(PingAPI.ID, null))
-                            lastSentTime = System.currentTimeMillis()
-                        }
-
-                        // Read incoming messages
-                        while (active && (serializer.isReady || inputStream.available() > 0)) {
-                            val message = serializer.readMessage()
-                            lastReceivedTime = System.currentTimeMillis()
-                            if (message?.service == null) {
-                                return // peer disconnected
-                            }
-                            when (message.service) {
-                                PingAPI.ID -> {
-                                    // Peer sent ping, reply with pong immediately
-                                    serializer.writeMessage(RPCMessage(PingAPI.PONG_ID, null))
-                                    lastSentTime = System.currentTimeMillis()
-                                }
-                                PingAPI.PONG_ID -> {
-                                    // Received pong reply
-                                }
-                                else -> {
-                                    handler.onDataReceived(message)
-                                }
-                            }
-                        }
-
-                        // Check ping timeout
-                        if (active && System.currentTimeMillis() - lastReceivedTime > PING_TIMEOUT_MS) {
-                            throw SocketTimeoutException(
-                                "Ping timeout: no response from server for ${PING_TIMEOUT_MS}ms"
-                            )
-                        }
-
-                        try {
-                            sleep(100)
-                        } catch (_: InterruptedException) {
-                            if (!active && queue.peek() == null) {
-                                return
-                            }
-                        }
+            val serializer = SerializerProvider.getSerializer(socket.getInputStream(), socket.getOutputStream())
+            val connected = AtomicBoolean(true)
+            // A single writer owns serialization. Blocking queue waits wake immediately on send;
+            // the timeout exists only to emit an idle heartbeat, never to pace data transfers.
+            val writer = Thread({
+                try {
+                    while (active && connected.get()) {
+                        val message = queue.poll(PING_INTERVAL_MS, TimeUnit.MILLISECONDS)
+                            ?: RPCMessage(PingAPI.ID, null)
+                        serializer.writeMessage(message)
+                    }
+                } catch (e: Exception) {
+                    if (active && connected.get()) Log.w(TAG, "Wi-Fi writer stopped: ${e.message}")
+                } finally {
+                    connected.set(false)
+                    try { socket.close() } catch (_: Exception) { }
+                }
+            }, "Glass-WiFi-Writer")
+            writer.start()
+            try {
+                // A blocking reader runs independently of the writer. Socket timeout detects a
+                // silent peer; neither queued replies nor partial packets incur polling sleeps.
+                while (active && connected.get()) {
+                    val message = serializer.readMessage()
+                    if (message?.service == null) return
+                    when (message.service) {
+                        PingAPI.ID -> enqueue(RPCMessage(PingAPI.PONG_ID, null), priority = true)
+                        PingAPI.PONG_ID -> Unit
+                        else -> handler.onDataReceived(message)
                     }
                 }
+            } finally {
+                connected.set(false)
+                try { socket.close() } catch (_: Exception) { }
+                writer.interrupt()
+                writer.join()
+            }
+        }
+
+        private fun enqueue(message: RPCMessage, priority: Boolean = false) {
+            if (!active) return
+            val accepted = if (priority) queue.offerFirst(message) else queue.offerLast(message)
+            if (!accepted) {
+                // Bound the memory used by large media replies. A full queue is a broken/slow
+                // connection, not permission to retain an unbounded video in Glass memory.
+                Log.w(TAG, "Wi-Fi send backlog exceeded its limit; reconnecting")
+                try { currentSocket?.close() } catch (_: Exception) { }
             }
         }
 
         fun send(message: RPCMessage) {
-            if (!active) {
-                Log.w(TAG, "Cannot send, client is shutting down")
-                return
-            }
-            queue.add(message)
+            enqueue(message)
         }
 
         fun shutdown() {
-            val wasActive = active
             active = false
-            val socket = currentSocket
-            if (wasActive && socket != null && socket.isConnected && !socket.isClosed) {
-                queue.add(RPCMessage(null, null))
-                if (isAlive && Thread.currentThread() !== this) {
-                    try {
-                        join(1000)
-                    } catch (_: InterruptedException) {
-                    }
-                }
-            }
-            try {
-                currentSocket?.close()
-            } catch (_: Exception) {
-            }
+            queue.clear()
+            // Closing wakes a blocking read/connect/write immediately; no shutdown sleep.
+            try { currentSocket?.close() } catch (_: Exception) { }
             interrupt()
         }
     }
@@ -239,5 +203,6 @@ class WiFiClient(private val hostIP: String? = null) : IRPCClient {
         private const val RECONNECT_DELAY_MS = 2000L
         private const val PING_INTERVAL_MS = 5000L
         private const val PING_TIMEOUT_MS = 15000L
+        private const val MAX_QUEUED_MESSAGES = 32
     }
 }

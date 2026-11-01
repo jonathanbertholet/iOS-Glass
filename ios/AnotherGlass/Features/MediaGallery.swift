@@ -28,8 +28,15 @@ final class MediaGallery: ObservableObject {
     }
     private var pending: [String: Pending] = [:]
     private var queue: [String] = []
-    private var active: String?
-    private var timeout: Task<Void, Never>?
+    private static let chunkBytes = 96 * 1024
+    private static let readWindow = 4
+    private var active: Set<String> = []
+    private var timeouts: [String: Task<Void, Never>] = [:]
+
+    private struct DownloadChunk: Sendable {
+        let offset: Int64
+        let data: Data
+    }
 
     init(server: GlassServer) {
         self.server = server
@@ -118,32 +125,55 @@ final class MediaGallery: ObservableObject {
     func download(_ item: GlassMediaItem) {
         guard transfer == nil else { error = "A download is already in progress."; return }
         guard connected else { error = GalleryError.disconnected.localizedDescription; return }
-        guard item.size <= 2 * 1024 * 1024 * 1024 else { error = GalleryError.fileTooLarge.localizedDescription; return }
+        guard item.size > 0, item.size <= 2 * 1024 * 1024 * 1024 else { error = GalleryError.fileTooLarge.localizedDescription; return }
         downloadingID = item.id
         downloadProgress = 0
         error = nil
         let currentSession = session
         transfer = Task {
             var writer: MediaFileWriter?
-            defer { transfer = nil; downloadingID = nil }
+            defer {
+                transfer = nil
+                downloadingID = nil
+                sendNext() // Resume thumbnails deferred during the original transfer.
+            }
             do {
                 let thumbnail = try? await thumbnailBytes(for: item)
                 try Task.checkCancellation()
                 let file = try MediaFileWriter()
                 writer = file
-                var offset: Int64 = 0
-                while offset < item.size {
-                    try Task.checkCancellation()
-                    let count = Int(min(96 * 1024, item.size - offset))
-                    let message = GlassMediaRequest(operation: "Read", mediaId: item.id,
-                                                   revision: item.revision, offset: offset, length: count)
-                    let reply = try await request(message)
-                    try Task.checkCancellation()
-                    guard currentSession == session, reply.offset == offset, reply.totalBytes == item.size,
-                          let bytes = reply.data, bytes.count == count else { throw GalleryError.invalidReply }
-                    try await file.append(bytes)
-                    offset += Int64(bytes.count)
-                    downloadProgress = Double(offset) / Double(item.size)
+                // Bound both requests and completed out-of-order chunks to one four-chunk
+                // window. A slow first reply cannot cause an unbounded reorder buffer.
+                try await withThrowingTaskGroup(of: DownloadChunk.self) { group in
+                    var requestedOffset: Int64 = 0
+                    var writtenOffset: Int64 = 0
+                    var ready: [Int64: Data] = [:]
+                    var lastProgress = ContinuousClock.now
+                    while writtenOffset < item.size {
+                        try Task.checkCancellation()
+                        let windowEnd = min(item.size, writtenOffset + Int64(Self.chunkBytes * Self.readWindow))
+                        while requestedOffset < windowEnd {
+                            let offset = requestedOffset
+                            let count = Int(min(Int64(Self.chunkBytes), item.size - offset))
+                            group.addTask {
+                                try await self.readChunk(item, offset: offset, count: count, session: currentSession)
+                            }
+                            requestedOffset += Int64(count)
+                        }
+                        guard let chunk = try await group.next() else { throw GalleryError.invalidReply }
+                        ready[chunk.offset] = chunk.data
+                        while let bytes = ready.removeValue(forKey: writtenOffset) {
+                            try Task.checkCancellation()
+                            guard currentSession == session else { throw GalleryError.disconnected }
+                            try await file.append(bytes)
+                            writtenOffset += Int64(bytes.count)
+                        }
+                        let now = ContinuousClock.now
+                        if writtenOffset == item.size || lastProgress.duration(to: now) >= .milliseconds(100) {
+                            downloadProgress = Double(writtenOffset) / Double(item.size)
+                            lastProgress = now
+                        }
+                    }
                 }
                 try Task.checkCancellation()
                 let saved = DownloadedMedia(id: UUID(), original: item, downloadedAt: Date())
@@ -154,9 +184,21 @@ final class MediaGallery: ObservableObject {
                 if let writer { await writer.discard() }
             } catch {
                 if let writer { await writer.discard() }
-                if !Task.isCancelled { self.error = error.localizedDescription }
+                if !Task.isCancelled, currentSession == session { self.error = error.localizedDescription }
             }
         }
+    }
+
+    private func readChunk(_ item: GlassMediaItem, offset: Int64, count: Int, session expectedSession: UUID) async throws -> DownloadChunk {
+        try Task.checkCancellation()
+        guard expectedSession == session else { throw GalleryError.disconnected }
+        let message = GlassMediaRequest(operation: "Read", mediaId: item.id,
+                                       revision: item.revision, offset: offset, length: count)
+        let reply = try await request(message)
+        try Task.checkCancellation()
+        guard expectedSession == session, reply.offset == offset, reply.totalBytes == item.size,
+              let bytes = reply.data, bytes.count == count else { throw GalleryError.invalidReply }
+        return DownloadChunk(offset: offset, data: bytes)
     }
 
     func cancelDownload() { transfer?.cancel() }
@@ -176,7 +218,7 @@ final class MediaGallery: ObservableObject {
             if let error = reply.error { finish(reply.requestId, result: .failure(GalleryError.remote(error))) }
             else { finish(reply.requestId, result: .success(reply)) }
         } catch {
-            if let active { finish(active, result: .failure(GalleryError.invalidReply)) }
+            failPending(with: GalleryError.invalidReply)
         }
     }
 
@@ -190,8 +232,7 @@ final class MediaGallery: ObservableObject {
                     continuation.resume(throwing: GalleryError.remote("Too many thumbnail requests. Try again.")); return
                 }
                 pending[message.requestId] = Pending(request: message, continuation: continuation)
-                if message.operation == "Thumbnail" { queue.append(message.requestId) }
-                else { queue.insert(message.requestId, at: 0) }
+                queue.append(message.requestId)
                 sendNext()
             }
         } onCancel: {
@@ -200,28 +241,38 @@ final class MediaGallery: ObservableObject {
     }
 
     private func sendNext() {
-        guard active == nil, connected else { return }
-        while !queue.isEmpty {
-            let id = queue.removeFirst()
+        guard connected else { return }
+        guard let server else { failPending(with: GalleryError.disconnected); return }
+        while true {
+            let readCount = active.reduce(0) { $0 + (pending[$1]?.request.operation == "Read" ? 1 : 0) }
+            // Reads use a dedicated bounded window; at most one metadata request shares the
+            // Glass worker. Other thumbnails wait while downloading to avoid expensive work
+            // in front of every file chunk. FIFO within each lane preserves offset order.
+            let nextRead = readCount < Self.readWindow ? queue.firstIndex { pending[$0]?.request.operation == "Read" } : nil
+            let nextMetadata = active.count == readCount ? queue.firstIndex { id in
+                guard let request = pending[id]?.request, request.operation != "Read" else { return false }
+                return downloadingID == nil || request.operation != "Thumbnail" || request.mediaId == downloadingID
+            } : nil
+            guard let index = nextRead ?? nextMetadata else { return }
+            let id = queue.remove(at: index)
             guard let waiting = pending[id] else { continue }
-            active = id
-            timeout = Task { [weak self] in
+            active.insert(id)
+            timeouts[id] = Task { [weak self] in
                 do { try await Task.sleep(for: .seconds(25)) } catch { return }
                 self?.finish(id, result: .failure(GalleryError.timeout))
             }
-            guard let server else { finish(id, result: .failure(GalleryError.disconnected)); return }
             server.send(service: "MediaLibrary", type: GlassProtocol.mediaLibraryRequestType,
                         payload: waiting.request) { [weak self] sent in
                 if !sent { self?.finish(id, result: .failure(GalleryError.disconnected)) }
             }
-            return
         }
     }
 
     private func finish(_ id: String, result: Result<GlassMediaReply, Error>) {
         guard let waiting = pending.removeValue(forKey: id) else { return }
         queue.removeAll { $0 == id }
-        if active == id { active = nil; timeout?.cancel(); timeout = nil }
+        active.remove(id)
+        timeouts.removeValue(forKey: id)?.cancel()
         waiting.continuation.resume(with: result)
         sendNext()
     }
@@ -230,9 +281,9 @@ final class MediaGallery: ObservableObject {
         let waiting = pending.values.map { $0.continuation }
         pending.removeAll()
         queue.removeAll()
-        active = nil
-        timeout?.cancel()
-        timeout = nil
+        active.removeAll()
+        timeouts.values.forEach { $0.cancel() }
+        timeouts.removeAll()
         waiting.forEach { $0.resume(throwing: error) }
     }
 }
